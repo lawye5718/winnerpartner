@@ -1,0 +1,16 @@
+{
+  "system": {
+    "ui": {
+      "theme": "light",
+      "window_topmost": true
+    },
+    "monitor": {
+      "red_rectangle": null,
+      "interval": 20
+    },
+    "log": {
+      "counter": 1,
+      "last_source": null
+    }
+  }
+}
