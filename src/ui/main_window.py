@@ -216,9 +216,6 @@ class MainWindow(QMainWindow):
         # 设置坐标映射器的红色矩形区域
         self.coordinate_mapper.set_red_rectangle(*red_rect)
         
-        # 清空已扫描位置记录
-        self.scanned_positions.clear()
-        
         self.status_bar.showMessage("矩形区域已确认，请点击扫描按钮检测深绿色像素")
         
         self.log_message("确认矩形区域")
@@ -227,9 +224,6 @@ class MainWindow(QMainWindow):
         """重新确定位置"""
         self.log_message("重新确定矩形位置")
         self.red_rect_label.setText("红色矩形坐标: 未设置")
-        
-        # 清空已扫描位置记录
-        self.scanned_positions.clear()
         
         # 选择红色矩形区域
         self.select_red_rectangle()
@@ -634,12 +628,23 @@ class MainWindow(QMainWindow):
             self.log_entry(text, "coordinate_input")
 
     def log_entry(self, text, source):
-        """记录日志条目"""
+        """
+        记录日志条目
+        实时写入文件，防止数据丢失
+        """
         # 检查是否需要轮换记录源
         if self.last_logged_source is None or self.last_logged_source != source:
             log_text = f"{self.log_counter}, {text}\n"
             self.log_text.insertPlainText(log_text)
             self.log_text.ensureCursorVisible()
+            
+            # 实时追加写入文件，防止程序崩溃导致数据丢失
+            try:
+                with open("mygame.txt", "a", encoding="utf-8") as f:
+                    f.write(log_text)
+            except Exception as e:
+                # 静默失败，不影响主流程
+                pass
             
             self.log_counter += 1
             self.last_logged_source = source

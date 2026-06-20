@@ -12,10 +12,15 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from ui.main_window import MainWindow
 from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import Qt
 
 
 def main():
     """主函数"""
+    # 启用高 DPI 支持，解决 Mac Retina 屏幕缩放问题
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
