@@ -106,4 +106,4 @@ class CoordinateMapper:
         # 行: 1-19 对应 0-18 (从上到下)
         y = top + (19 - row) * cell_height
         
-        return (int(x), int(y))
+        return (int(round(x)), int(round(y)))

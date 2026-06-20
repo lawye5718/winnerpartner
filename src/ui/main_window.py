@@ -249,7 +249,7 @@ class MainWindow(QMainWindow):
     def check_green_pixels(self):
         """
         架构优化后的极速扫描算法
-        使用全局遮罩替代局部轮询，性能提升约20倍
+        使用全局遮罩+轮廓检测，避免重心偏移问题
         :return: 检测到的坐标字符串，未检测到返回 None
         """
         try:
@@ -272,6 +272,7 @@ class MainWindow(QMainWindow):
                 
                 # 转换为numpy数组 (BGR格式)
                 img_array = np.array(screenshot)
+                height, width = img_array.shape[:2]
                 
                 # 定义深绿色范围
                 lower_green = np.array([0, 100, 0])
@@ -279,25 +280,43 @@ class MainWindow(QMainWindow):
                 
                 # 1. 一次性全局过滤，提取整张图的深绿色掩码
                 green_mask = cv2.inRange(img_array, lower_green, upper_green)
-                green_count = np.count_nonzero(green_mask)
                 
-                # 2. 如果存在足够多的绿色像素，计算重心
-                if green_count > self.GREEN_THRESHOLD:
-                    # 获取所有绿色像素的y, x坐标
-                    y_coords, x_coords = np.where(green_mask > 0)
+                # 2. 动态计算阈值（基于棋盘大小）
+                rect_width = abs(red_rect[2] - red_rect[0])
+                cell_width = rect_width / 18.0
+                scan_radius = max(3, int(cell_width * 0.4))
+                scan_area = (2 * scan_radius + 1) ** 2
+                dynamic_green_threshold = int(scan_area * 0.6)
+                
+                # 3. 查找绿色像素的轮廓
+                contours, _ = cv2.findContours(green_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                
+                # 4. 遍历每个轮廓，找到面积最大的有效团块
+                for contour in contours:
+                    area = cv2.contourArea(contour)
                     
-                    # 计算重心（中心点）
-                    center_x = int(np.mean(x_coords)) + red_rect[0]
-                    center_y = int(np.mean(y_coords)) + red_rect[1]
+                    # 如果面积小于动态阈值，跳过小噪点
+                    if area < dynamic_green_threshold:
+                        continue
                     
-                    # 3. 将屏幕坐标直接映射回围棋坐标 (O(1)复杂度)
-                    coordinate = self.coordinate_mapper.screen_to_board(center_x, center_y)
+                    # 计算轮廓的重心
+                    M = cv2.moments(contour)
+                    if M["m00"] == 0:
+                        continue
                     
-                    if coordinate:
-                        self.text_display.setText(coordinate)
-                        self.log_entry(coordinate, "auto_scan")
-                        self.status_bar.showMessage(f"瞬时捕获对手落子: {coordinate}")
-                        return coordinate
+                    center_x = int(M["m10"] / M["m00"]) + red_rect[0]
+                    center_y = int(M["m01"] / M["m00"]) + red_rect[1]
+                    
+                    # 5. 二次验证：向上检测像素颜色
+                    if self.verify_pixel_point(img_array, center_x, center_y):
+                        # 6. 将屏幕坐标映射回围棋坐标
+                        coordinate = self.coordinate_mapper.screen_to_board(center_x, center_y)
+                        
+                        if coordinate:
+                            self.text_display.setText(coordinate)
+                            self.log_entry(coordinate, "auto_scan")
+                            self.status_bar.showMessage(f"瞬时捕获对手落子: {coordinate}")
+                            return coordinate
                         
                 self.status_bar.showMessage("扫描完成，未检测到有效坐标")
                 return None
@@ -517,6 +536,7 @@ class MainWindow(QMainWindow):
         result = self.mouse_controller.double_click_at_coordinate(coordinate, self.coordinate_mapper)
         if result["success"]:
             self.log_from_coordinate_input()
+            self.coordinate_input.clear()  # 清空输入框，方便下次输入
             self.status_bar.showMessage(f"已在 {coordinate} 位置双击")
         else:
             QMessageBox.critical(self, "错误", f"下棋操作失败: {result['message']}")
