@@ -242,6 +242,9 @@ class MainWindow(QMainWindow):
             if not red_rect:
                 self.status_bar.showMessage("未设置红色矩形区域")
                 return
+            
+            # 每次扫描前清空已扫描位置记录，避免漏判二次落子
+            self.scanned_positions.clear()
                 
             # 使用mss截取屏幕区域
             import mss
@@ -328,6 +331,39 @@ class MainWindow(QMainWindow):
                 
         return coordinates
 
+    def verify_pixel_point(self, img_array, start_x, start_y):
+        """
+        二次验证：向上逐个像素检测
+        :param img_array: 图像数组 (BGR格式)
+        :param start_x: 起始x坐标
+        :param start_y: 起始y坐标
+        :return: True表示验证通过，False表示验证失败
+        """
+        height = img_array.shape[0]
+        
+        # 向上遍历（y递减），最多向上检查50个像素
+        for y in range(start_y, max(-1, start_y - 50), -1):
+            if y >= height or y < 0:
+                break
+                
+            pixel = img_array[y, start_x]
+            # OpenCV 默认读取的是 BGR 格式
+            b, g, r = int(pixel[0]), int(pixel[1]), int(pixel[2])
+            
+            # 判断颜色（根据实际棋子颜色调整阈值）
+            is_green = g > 100 and b < 80 and r < 80
+            is_white = b > 200 and g > 200 and r > 200
+            is_black = b < 50 and g < 50 and r < 50
+            
+            if is_green or is_black:
+                continue  # 遇到绿色或黑色，继续向上寻找不同颜色
+            elif is_white:
+                return True  # 遇到白色像素点，标记正确
+            else:
+                return False  # 出现其他颜色，标记错误
+        
+        return False  # 超出范围，验证失败
+
     def short_scan(self, img_array, x, y):
         """
         短扫检查
@@ -338,11 +374,26 @@ class MainWindow(QMainWindow):
         """
         height, width = img_array.shape[:2]
         
+        # 获取红色矩形区域以计算动态阈值
+        red_rect = self.config_manager.get_system_setting("monitor.red_rectangle")
+        if not red_rect:
+            return None
+            
+        x1, y1, x2, y2 = red_rect
+        rect_width = abs(x2 - x1)
+        cell_width = rect_width / 18.0
+        
+        # 动态计算扫描范围和阈值
+        scan_radius = max(3, int(cell_width * 0.4))  # 动态半径，不超过格子一半
+        scan_area = (2 * scan_radius + 1) ** 2
+        green_threshold = int(scan_area * 0.6)  # 动态阈值（面积的60%）
+        white_black_threshold = int(scan_area * 0.6)
+        
         # 计算短扫矩形框的边界
-        left = max(0, x - self.SCAN_RANGE)
-        right = min(width - 1, x + self.SCAN_RANGE)
-        top = max(0, y - self.SCAN_RANGE)
-        bottom = min(height - 1, y + self.SCAN_RANGE)
+        left = max(0, x - scan_radius)
+        right = min(width - 1, x + scan_radius)
+        top = max(0, y - scan_radius)
+        bottom = min(height - 1, y + scan_radius)
         
         # 提取短扫区域
         region = img_array[top:bottom+1, left:right+1]
@@ -369,12 +420,15 @@ class MainWindow(QMainWindow):
         green_count = np.count_nonzero(green_mask)
         
         # 判断逻辑
-        if white_count + black_count > self.WHITE_BLACK_THRESHOLD:
-            # 超过300个白色或黑色像素点，标记为下次不再扫描
+        if white_count + black_count > white_black_threshold:
+            # 超过阈值的白色或黑色像素点，标记为下次不再扫描
             return "skip"
-        elif green_count > self.GREEN_THRESHOLD:
-            # 超过300个深绿色像素点，确认并输出该坐标
-            return "valid"
+        elif green_count > green_threshold:
+            # 超过阈值的深绿色像素点，进行二次验证
+            if self.verify_pixel_point(img_array, x, y):
+                return "valid"
+            else:
+                return None  # 二次验证失败，继续检查
         
         return None  # 继续检查
 
@@ -547,8 +601,11 @@ class MainWindow(QMainWindow):
     def save_log_to_file(self):
         """保存日志到文件"""
         try:
-            with open("mygame.txt", "w", encoding="utf-8") as f:
+            from datetime import datetime
+            filename = f"mygame_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            with open(filename, "w", encoding="utf-8") as f:
                 f.write(self.log_text.toPlainText())
+            self.status_bar.showMessage(f"日志已保存到 {filename}")
         except Exception as e:
             self.status_bar.showMessage(f"保存日志失败: {e}")
 

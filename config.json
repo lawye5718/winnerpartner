@@ -5,7 +5,12 @@
       "window_topmost": true
     },
     "monitor": {
-      "red_rectangle": null,
+      "red_rectangle": [
+        971,
+        255,
+        1479,
+        758
+      ],
       "interval": 20
     },
     "log": {
