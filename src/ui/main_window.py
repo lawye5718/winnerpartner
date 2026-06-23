@@ -19,7 +19,14 @@ import numpy as np
 import cv2
 import json
 import subprocess
-import keyboard  # 全局快捷键支持
+
+# 【权限修复】：安全导入 keyboard，防止 Mac 缺少 sudo 权限导致程序崩溃
+try:
+    import keyboard
+    HAS_KEYBOARD = True
+except ImportError:
+    HAS_KEYBOARD = False
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.config_manager import ConfigManager
@@ -94,9 +101,13 @@ class MainWindow(QMainWindow):
         # 设置系统托盘图标
         self.setup_system_tray()
         
-        # 注册全局快捷键 (F9 强制扫描，F10 开启/关闭自动扫描)
-        keyboard.add_hotkey('f9', self.force_manual_scan)
-        keyboard.add_hotkey('f10', self.toggle_auto_scan)
+        # 注册全局快捷键 (加入安全判断)
+        if HAS_KEYBOARD:
+            try:
+                keyboard.add_hotkey('f9', self.force_manual_scan)
+                keyboard.add_hotkey('f10', self.toggle_auto_scan)
+            except Exception as e:
+                print(f"⚠️ 无法注册全局快捷键 (Mac 环境通常需要 sudo 权限): {e}")
 
     def create_top_control_area(self, parent_layout):
         """创建顶部控制区域"""
@@ -711,8 +722,11 @@ class MainWindow(QMainWindow):
         if self.is_auto_scanning:
             self.scan_timer.stop()
         
-        # 注销所有全局快捷键
-        keyboard.unhook_all()
-        
+        if HAS_KEYBOARD:
+            try:
+                keyboard.unhook_all()
+            except Exception:
+                pass
+                
         # 接受关闭事件
         event.accept()

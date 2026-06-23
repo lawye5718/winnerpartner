@@ -3,48 +3,60 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import subprocess
+import threading
 
 # ==========================================
-# 核心组件：GTP 协议控制器 (用于对接 KataGo/Leela 等)
+# 核心组件：GTP 协议控制器 (用于对接 KataGo)
 # ==========================================
 class GTPController:
     def __init__(self, engine_path, model_path, config_path):
         print(f"🔄 正在启动本地围棋 AI 引擎: {engine_path}...")
         
-        # 完整的 KataGo 启动命令必须包含 -model 和 -config
+        # 【关键修复1】：加入线程锁，防止高频并发请求导致输入输出流崩溃
+        self.lock = threading.Lock()
+        
         cmd = [engine_path, "gtp", "-model", model_path, "-config", config_path]
             
         self.process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            # 【关键修复1】：设为 None 让引擎日志直接输出到控制台。
-            # 既防止了未被读取导致的 PIPE 缓冲区写满死锁，又能让你在终端看到 AI 的算路胜率！
-            stderr=None, 
+            stderr=None,  # 允许引擎日志直接打印到终端
             text=True,
             bufsize=1
         )
+        
+        # 初始化棋盘
         self.send_command("boardsize 19")
         self.send_command("clear_board")
+        
+        # 【关键修复2】：强制设置思考时间 (0秒主时间，每步5秒，1次读秒)
+        # 防止 KataGo 无限期算路导致“半天没反应”
+        self.send_command("time_settings 0 5 1")
+        
         print("✅ AI 引擎启动完成并已就绪。")
 
     def send_command(self, cmd):
-        """向引擎发送命令并阻塞读取返回结果"""
-        self.process.stdin.write(cmd + "\n")
-        self.process.stdin.flush()
-        
-        output = ""
-        while True:
-            line = self.process.stdout.readline()
-            if line == "":  # 遇到 EOF，说明引擎意外退出了
-                break
-            # 【关键修复3】：GTP 协议以一个空行结束，使用 strip() 兼容 Mac/Win 的各种换行符
-            if line.strip() == "": 
-                break
-            output += line
+        """向引擎发送命令并阻塞读取返回结果（带线程锁）"""
+        with self.lock:
+            # 发送指令前打印日志，方便定位问题
+            print(f"\n[GTP 发送] ➡️ {cmd}")
             
-        # GTP 返回成功格式为 "= 结果"，失败为 "? 错误信息"
-        return output.strip().lstrip("= ")
+            self.process.stdin.write(cmd + "\n")
+            self.process.stdin.flush()
+            
+            output = ""
+            while True:
+                line = self.process.stdout.readline()
+                if line == "":  # EOF
+                    break
+                if line.strip() == "": # 遇到空行说明这条GTP指令返回完毕
+                    break
+                output += line
+                
+            res = output.strip()
+            print(f"[GTP 接收] ⬅️ {res}")
+            return res.lstrip("= ")
 
     def sync_opponent_move(self, color, coord):
         """同步网页上发生的实际招法到内部棋盘"""
@@ -52,19 +64,15 @@ class GTPController:
 
     def generate_best_move(self, my_color):
         """让 AI 思考并返回最佳选点"""
-        print(f"🤔 AI 正在疯狂算路中 (为 {my_color} 思考)...")
         best_move = self.send_command(f"genmove {my_color}")
         
-        # 【关键修复2】：战术性悔棋 (Undo) 防不同步机制！
-        # genmove 不仅会返回坐标，还会默认在内部棋盘落子。
-        # 如果不 undo，等网页真实落子后油猴脚本把招法再次传回来同步时，KataGo 会报非法落子(重叠)。
-        # 因此，AI 想出招法后立刻撤销，保持内部绝对干净，完全依赖网页的真实事件流来推进。
-        if not best_move.startswith("?"): # 只要没有返回错误信息
+        # 战术性悔棋 (Undo)，防状态不同步机制
+        if not best_move.startswith("?"): 
             self.send_command("undo")
             
         return best_move
 
-# 初始化 FastAPI 和 AI 引擎
+# 初始化 FastAPI
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -81,28 +89,29 @@ class MoveData(BaseModel):
     player: str
     raw_coordinate: str
 
+# 【关键修复3】：移除 async 关键字！
+# 这样 FastAPI 会将其放入后台线程池执行，彻底解决阻塞 ASGI 事件循环导致的死锁假死！
 @app.post("/api/move")
-async def receive_move(data: MoveData):
-    print("-" * 40)
+def receive_move(data: MoveData):
+    print("=" * 50)
     print(f"📥 [第 {data.step} 手] 网页发生落子 | 玩家: {data.player} | 坐标: {data.raw_coordinate}")
     
-    # 转换为GTP坐标 (例如: q-16 -> Q16)
     gtp_coord = data.raw_coordinate.replace("-", "").upper()
     
-    # 将网页最新招法同步进 KataGo 的内部大脑
+    # 1. 同步对手最新招法
     sync_result = ai_engine.sync_opponent_move(data.player, gtp_coord)
     if sync_result.startswith("?"):
         print(f"⚠️ 引擎同步异常: {sync_result}")
     
-    # 对方下了，我们要计算己方(另一种颜色)的招法
+    # 2. 我们扮演对手的相反颜色
     my_color = "B" if data.player == "W" else "W"
+    print(f"🤔 正在呼叫 KataGo 为 [{my_color}] 计算反击招法...")
     
-    # 触发引擎计算
+    # 3. 触发引擎计算
     ai_recommendation = ai_engine.generate_best_move(my_color)
 
     print(f"🎯 AI 最终决定下在: {ai_recommendation}")
     
-    # 返回给油猴脚本用于高亮红点或自动执行
     return {
         "status": "success", 
         "opponent_move": gtp_coord,
