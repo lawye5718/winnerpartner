@@ -3,7 +3,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import subprocess
-import threading
 
 # ==========================================
 # 核心组件：GTP 协议控制器 (用于对接 KataGo/Leela 等)
@@ -19,7 +18,9 @@ class GTPController:
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            # 【关键修复1】：设为 None 让引擎日志直接输出到控制台。
+            # 既防止了未被读取导致的 PIPE 缓冲区写满死锁，又能让你在终端看到 AI 的算路胜率！
+            stderr=None, 
             text=True,
             bufsize=1
         )
@@ -35,7 +36,10 @@ class GTPController:
         output = ""
         while True:
             line = self.process.stdout.readline()
-            if line == "\n":  # GTP 协议规定输出以一个空行结束
+            if line == "":  # 遇到 EOF，说明引擎意外退出了
+                break
+            # 【关键修复3】：GTP 协议以一个空行结束，使用 strip() 兼容 Mac/Win 的各种换行符
+            if line.strip() == "": 
                 break
             output += line
             
@@ -43,28 +47,35 @@ class GTPController:
         return output.strip().lstrip("= ")
 
     def sync_opponent_move(self, color, coord):
-        """同步对手的招法到内部棋盘"""
+        """同步网页上发生的实际招法到内部棋盘"""
         return self.send_command(f"play {color} {coord}")
 
     def generate_best_move(self, my_color):
         """让 AI 思考并返回最佳选点"""
-        print("🤔 AI 正在疯狂算路中...")
+        print(f"🤔 AI 正在疯狂算路中 (为 {my_color} 思考)...")
         best_move = self.send_command(f"genmove {my_color}")
+        
+        # 【关键修复2】：战术性悔棋 (Undo) 防不同步机制！
+        # genmove 不仅会返回坐标，还会默认在内部棋盘落子。
+        # 如果不 undo，等网页真实落子后油猴脚本把招法再次传回来同步时，KataGo 会报非法落子(重叠)。
+        # 因此，AI 想出招法后立刻撤销，保持内部绝对干净，完全依赖网页的真实事件流来推进。
+        if not best_move.startswith("?"): # 只要没有返回错误信息
+            self.send_command("undo")
+            
         return best_move
 
 # 初始化 FastAPI 和 AI 引擎
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# TODO: 填入你 Mac 上实际的 KataGo 或其他引擎的路径
+# 引擎路径配置
 ENGINE_PATH = "/Users/yuanliang/projects/KataGo/cpp/katago"
 MODEL_PATH = "/Users/yuanliang/projects/KataGo/default_model.bin.gz"
 CONFIG_PATH = "/Users/yuanliang/superstar/superstar3.1/projects/winnerpartner/gtp_custom.cfg"
 
-# 真正实例化引擎 (取消之前的模拟模式)
+# 实例化引擎
 ai_engine = GTPController(ENGINE_PATH, MODEL_PATH, CONFIG_PATH) 
 
-# 定义接收数据的格式
 class MoveData(BaseModel):
     step: int
     player: str
@@ -73,31 +84,25 @@ class MoveData(BaseModel):
 @app.post("/api/move")
 async def receive_move(data: MoveData):
     print("-" * 40)
-    print(f"📥 收到第 {data.step} 手 | 玩家: {data.player} | 坐标: {data.raw_coordinate}")
+    print(f"📥 [第 {data.step} 手] 网页发生落子 | 玩家: {data.player} | 坐标: {data.raw_coordinate}")
     
-    # 转换为GTP坐标 (去除短横线)
+    # 转换为GTP坐标 (例如: q-16 -> Q16)
     gtp_coord = data.raw_coordinate.replace("-", "").upper()
     
-    # 我们扮演的颜色（如果当前是对手W下了，我们就应该让AI算B的招法）
+    # 将网页最新招法同步进 KataGo 的内部大脑
+    sync_result = ai_engine.sync_opponent_move(data.player, gtp_coord)
+    if sync_result.startswith("?"):
+        print(f"⚠️ 引擎同步异常: {sync_result}")
+    
+    # 对方下了，我们要计算己方(另一种颜色)的招法
     my_color = "B" if data.player == "W" else "W"
     
-    ai_recommendation = ""
-    
-    if ai_engine:
-        # 1. 告诉 AI 对手刚下在了哪
-        ai_engine.sync_opponent_move(data.player, gtp_coord)
-        # 2. 让 AI 生成我们的应对招法
-        ai_recommendation = ai_engine.generate_best_move(my_color)
-    else:
-        # 【模拟模式】如果没有挂载真实AI，这里假装返回一个坐标用于测试
-        import random
-        cols = "ABCDEFGHJKLMNOPQRST"
-        ai_recommendation = f"{random.choice(cols)}{random.randint(1, 19)}"
-        print("⚠️ 引擎未挂载，返回模拟坐标")
+    # 触发引擎计算
+    ai_recommendation = ai_engine.generate_best_move(my_color)
 
-    print(f"🎯 AI 决定下在: {ai_recommendation}")
+    print(f"🎯 AI 最终决定下在: {ai_recommendation}")
     
-    # 将 AI 的决定返回给浏览器前端
+    # 返回给油猴脚本用于高亮红点或自动执行
     return {
         "status": "success", 
         "opponent_move": gtp_coord,
